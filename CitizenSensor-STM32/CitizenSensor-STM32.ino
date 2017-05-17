@@ -4,11 +4,12 @@
              (c) 2017 Hartmut John
 
    TTN Stuttgart Version - Hardware Küche #3, 17.05.2017
-   works with stm32duiono.com bootloader für generic pc13 bords
+   works with stm32duiono.com bootloader for generic boards with led on PC13
    aka 'blue pill' stm32f103c8t6
    Importat: USB Serial is not working together with sleep mode
 
-   adapted STM32 Arduino integration: https://github.com/tomtor/Arduino_STM32
+   install adapted STM32 Arduino integration from here 
+   https://github.com/tomtor/Arduino_STM32
 
    non arduino mbed.org version can be found here
    https://developer.mbed.org/users/orangeway/code/STM32F103C8T6_LoRaWAN-lmic-app/
@@ -54,11 +55,11 @@ BME280 mySensor;
 // Enable OTA? - work in progress
 //#define OTA
 
-// use low power sleep: 0.5mA
+// use low power sleep: 500-700 uA
 #define SLEEP
 
 #ifdef SLEEP
-// or DeepSleep: 0.05mA, but RAM is lost and reboots on wakeup.
+// or DeepSleep: 50uA, but RAM is lost and reboots on wakeup.
 // We safe some data in the RTC backup ram which survives DeepSleep
 #define DEEP_SLEEP  false
 
@@ -68,31 +69,28 @@ BME280 mySensor;
 #endif
 
 #define led       LED_BUILTIN
-#define voltage   PA0
 
 // port for RFM95 LoRa Radio
 #define USE_SPI   1
 
 #ifndef OTA
 // LoRaWAN NwkSKey, your network session key, 16 bytes (from console.thethingsnetwork.org)
-// default points to ttn stuttgart community app
 static unsigned char NWKSKEY[16] = { 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01 };
 
 // LoRaWAN AppSKey, application session key, 16 bytes  (from console.thethingsnetwork.org)
-// default points to ttn stuttgart community app
 static unsigned char APPSKEY[16] = { 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0 };
 
 // LoRaWAN end-device address (DevAddr), ie 0xABB481F1  (from console.thethingsnetwork.org)
 static const u4_t DEVADDR = 0x42233224 ; // <-- Change this address for every node!
 
-#else
-
-static const u1_t APPEUI[8] = { }; // for OTAA - reversed (LSB) 8 bytes of AppEUI registered with console.thethingsnetwork.org
-
-static const unsigned char APPKEY[16] = { }; // MSB 16 bytes of the APPKEY used when registering a device with ttnctl register DevEUI AppKey
+#else // if use OTAA (over the air activaton)
+// reversed (LSB) 8 bytes of AppEUI registered with console.thethingsnetwork.org
+static const u1_t APPEUI[8] = { }; 
+// MSB 16 bytes of the APPKEY used when registering a device with ttnctl register DevEUI AppKey
+static const unsigned char APPKEY[16] = { }; 
 #endif
 
-// STM32 Unique Chip IDs
+// STM32 Unique Chip IDs - used as device id in OTAA scenario
 #define STM32_ID	((u1_t *) 0x1FFFF7E8)
 
 SPIClass mySPI(USE_SPI);
@@ -287,7 +285,7 @@ const lmic_pinmap lmic_pins = {
   .nss = PA4,
   .rxtx = LMIC_UNUSED_PIN,
   .rst = PB0,
-  .dio = {PA3, PA5, LMIC_UNUSED_PIN} // we dont use dio2
+  .dio = {PA3, PB5, LMIC_UNUSED_PIN} // we dont use dio2
 #else // USE_SPI == 2
   .nss = PB12,
   .rxtx = LMIC_UNUSED_PIN,
@@ -416,22 +414,6 @@ void do_send(osjob_t* j) {
   TX_done = false;
 
 }
-
-void blinkTemp(int n, int d = 500, int t = 800)
-{
-  const int tempBlinkPin = PB7;
-
-  pinMode(tempBlinkPin, OUTPUT);
-  for (int i = 0; i < n; i++) {
-    digitalWrite(tempBlinkPin, 0);
-    mdelay(5);
-    digitalWrite(tempBlinkPin, 1);
-    mdelay(d);
-  }
-  pinMode(tempBlinkPin, INPUT_ANALOG);
-  mdelay(t);
-}
-
 
 void readData()
 {
@@ -668,9 +650,9 @@ void loop() {
     pinMode(lmic_pins.nss, OUTPUT);
 
     // DIO Inputs
-    pinMode(PA11, INPUT_ANALOG);
-    pinMode(PA12, INPUT_ANALOG);
-    pinMode(PA15, INPUT_ANALOG);
+    pinMode(lmic_pins.dio[0], INPUT_ANALOG);
+    pinMode(lmic_pins.dio[1], INPUT_ANALOG);
+    pinMode(lmic_pins.dio[2], INPUT_ANALOG);
 
     pinMode(lmic_pins.rst, INPUT_ANALOG);
 
@@ -698,21 +680,16 @@ void loop() {
 #endif
 }
 
-
+/*
+ * WIP: not power optimized
+ */
 void initBME280(void) {
-   //*** BME280 Driver settings********************************//
-  //specify I2C address.  Can be 0x77(default) or 0x76
   
-  //For I2C, enable the following and disable the SPI section
+  //*** BME280 Driver settings********************************//
+  //specify I2C address.  Can be 0x77(default) or 0x76
   mySensor.settings.commInterface = I2C_MODE;
   mySensor.settings.I2CAddress = 0x77;
-  
-
-  //mySensor.settings.commInterface = SPI_MODE;
-  //mySensor.settings.chipSelectPin = 4;
-  
-  // SDI, SLK
-  //Wire.begin(0, 2); // ESP PIN 7,6
+    
   //***Operation settings*****************************//
   
   //renMode can be:
