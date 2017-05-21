@@ -33,6 +33,23 @@
    - optionally comment #define DEBUG
    - optionally comment #define SLEEP
 
+
+   --- TTN Payload Decoder ---
+    function Decoder(bytes, port) {
+      // Decode an uplink message from a buffer
+      // (array) of bytes to an object of fields.
+      var decoded = {};
+    
+      if (port === 1) {
+        decoded.temp = (bytes[1]*256+bytes[0])/100.0;
+        decoded.pres = (bytes[3]*256+bytes[2])/100.0;
+        decoded.humi = (bytes[5]*256+bytes[4])/1.0;
+        decoded.power = bytes[6];
+        decoded.rate = bytes[7];
+      }
+      return decoded;
+    }
+
  *******************************************************************************/
 
 #include <lmic.h>
@@ -46,8 +63,11 @@
 //Global sensor object
 BME280 mySensor;
 
-// use BME280 Sensor on I2C?
-//#define USE_SENSOR
+// use BME280 Sensor on I2C Pins ?
+#define USE_SENSOR
+
+// send to single channel gateway?
+//#define SINGLE_CHN 1
 
 // show debug statements; comment next line to disable debug statements
 #define DEBUG
@@ -55,8 +75,8 @@ BME280 mySensor;
 // Enable OTA? - work in progress
 //#define OTA
 
-// use low power sleep: 500-700 uA
-#define SLEEP
+// use low power sleep: 500-700 uA - disable if you need serial debug working
+//#define SLEEP
 
 #ifdef SLEEP
 // or DeepSleep: 50uA, but RAM is lost and reboots on wakeup.
@@ -81,7 +101,7 @@ static unsigned char NWKSKEY[16] = { 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0
 static unsigned char APPSKEY[16] = { 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0 };
 
 // LoRaWAN end-device address (DevAddr), ie 0xABB481F1  (from console.thethingsnetwork.org)
-static const u4_t DEVADDR = 0x42233224 ; // <-- Change this address for every node!
+static const u4_t DEVADDR = 0x26011F20 ; // <-- Change this address for every node!
 
 #else // if use OTAA (over the air activaton)
 // reversed (LSB) 8 bytes of AppEUI registered with console.thethingsnetwork.org
@@ -108,7 +128,7 @@ int txInterval = (DEEP_SLEEP ? 300 : 60); // Note that the LED flashing takes so
 int txInterval = 60;
 #endif
 
-#define RATE        DR_SF8
+#define RATE        DR_SF9
 
 struct {
   unsigned short temp;
@@ -223,6 +243,11 @@ void msleep(uint32_t ms)
   while (rt.getTime() - start < ms) {
     asm("    wfi");
   }
+}
+#else
+void mdelay(int n, bool mode = false)
+{
+  delay(n);
 }
 #endif
 
@@ -437,13 +462,21 @@ void readData()
   mydata.power = (vref / 10) - 200;
 
 #ifdef USE_SENSOR
-  mydata.temp= mySensor.readTempC() * 100.00;  
-  mydata.humi= mySensor.readFloatHumidity() * 100.00;
-  mydata.pres= mySensor.readFloatPressure() * 100.00;
+#ifndef SLEEP
+  Serial.println(mySensor.begin(), HEX);
+  delay(10); // wait some time
+#endif
+  mydata.temp= (mySensor.readTempC() * 100.00);  
+  mydata.humi= (mySensor.readFloatHumidity() * 100.00);
+  mydata.pres= (mySensor.readFloatPressure() * 1);
+#ifndef SLEEP
+   pinMode(PB6, INPUT_ANALOG); //SCL save energy
+   pinMode(PB7, INPUT_ANALOG); //SDA save energy
+#endif
 #else
   mydata.temp= (21.25) * 100.00;  
   mydata.humi= (43.85) * 100.00;
-  mydata.pres= (1096) * 100.00;
+  mydata.pres= (1096) * 1;
 #endif
 
 #ifdef DEBUG
@@ -514,6 +547,9 @@ void setup() {
 #endif
 
   Serial.begin(115200);
+  Serial.println(F("Wait 5sec"));
+  delay(5000);
+  Serial.println(F("go"));
 
 #if 0
   // Show ID in human friendly format (digits 1..8)
@@ -547,6 +583,17 @@ void setup() {
   // your network here (unless your network autoconfigures them).
   // Setting up channels should happen after LMIC_setSession, as that
   // configures the minimal channel set.
+#ifdef SINGLE_CHN
+  LMIC_setupChannel(0, 868100000, DR_RANGE_MAP(DR_SF12, DR_SF7),  BAND_CENTI);      // g-band
+  LMIC_disableChannel(1);
+  LMIC_disableChannel(2);
+  LMIC_disableChannel(3);
+  LMIC_disableChannel(4);
+  LMIC_disableChannel(5);
+  LMIC_disableChannel(6);
+  LMIC_disableChannel(7);
+  LMIC_disableChannel(8);
+#else 
   LMIC_setupChannel(0, 868100000, DR_RANGE_MAP(DR_SF12, DR_SF7),  BAND_CENTI);      // g-band
   LMIC_setupChannel(1, 868300000, DR_RANGE_MAP(DR_SF12, DR_SF7B), BAND_CENTI);      // g-band
   LMIC_setupChannel(2, 868500000, DR_RANGE_MAP(DR_SF12, DR_SF7),  BAND_CENTI);      // g-band
@@ -560,6 +607,7 @@ void setup() {
   // devices' ping slots. LMIC does not have an easy way to define set this
   // frequency and support for class B is spotty and untested, so this
   // frequency is not configured here.
+#endif
 
 #if F_CPU == 8000000UL
   // HSI is less accurate
@@ -637,6 +685,9 @@ void loop() {
       storeBR(0, LMIC.seqnoUp);
 
     SPIp->end();
+    //mySensor.end();
+    pinMode(PB6, INPUT_ANALOG); //SCL
+    pinMode(PB7, INPUT_ANALOG); //SDA
 
     digitalWrite(PA5, LOW); // SCK
     pinMode(PA5, OUTPUT);
@@ -669,6 +720,7 @@ void loop() {
     hal_io_init();
 
     SPIp->begin();
+    Serial.println(mySensor.begin(), HEX);
 
 #ifdef DEBUG
     Serial.println(F("Sleep complete"));
@@ -688,7 +740,7 @@ void initBME280(void) {
   //*** BME280 Driver settings********************************//
   //specify I2C address.  Can be 0x77(default) or 0x76
   mySensor.settings.commInterface = I2C_MODE;
-  mySensor.settings.I2CAddress = 0x77;
+  mySensor.settings.I2CAddress = 0x76;
     
   //***Operation settings*****************************//
   
@@ -746,7 +798,7 @@ void initBME280(void) {
   Serial.print("ctrl_hum(0xF2): 0x");
   Serial.println(mySensor.readRegister(BME280_CTRL_HUMIDITY_REG), HEX);
 
-  randomSeed(analogRead(0));
+  //randomSeed(analogRead(0));
   
   Serial.println("BME 280 init done");
 }
