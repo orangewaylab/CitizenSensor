@@ -5,6 +5,7 @@ A low budget battery powered LoRa node to smart up your city
     <img src="media/STM32LoraNode.png" alt="LoraNode Fritzing"/>
 </p>
 
+## bill of materials
 | Parts List for boxed version              |
 |-------------------------------------------|
 | STM32F103C8T6 Minimum System Dev Board    |
@@ -17,4 +18,9 @@ A low budget battery powered LoRa node to smart up your city
 | Battery Holder 2xAA                       |
 | Header 2.54mm 12pin                       |
 | Abzweigdose IP54 grau Aufputz 75x75x40 mm |
-| CitizenSensor V1.1 PCB                    |
+| CitizenSensor V2.0 PCB                    |
+
+## Prototyp
+<p align="center">
+    <img src="media/CitizenSensorLora20.jpg" alt="Prototype"/>
+</p>
