@@ -36,7 +36,11 @@
    - set DEVADDR (value from console.thethingsnetwork.com)
    - optionally comment #define DEBUG
    - optionally comment #define SLEEP
-
+   - optionally decide wether to use standard format oder Cayenne Low Power Payload for use with www.mydevices.com
+      if Cayenne LPP - set boolean CAYENNE = true
+                     - delete TTN payload decoder
+                     - LPP Definition https://mydevices.com/cayenne/docs/#lora-cayenne-low-power-payload
+                     - you may want to change hardcoded channels 0x03 (temp), 0x04 (humidity), 0x05 (pressure) in void readData()
 
    --- TTN Payload Decoder ---
     function Decoder(bytes, port) {
@@ -145,6 +149,9 @@ struct {
   byte rate2;
   
 } mydata;
+
+byte cayenne_lpp[11]; // Array for data in Cayenne Low Power Payload 
+boolean CAYENNE = false; // true for cayenne lpp format, false for human readable ascii format
 
 void initBME280(void);
 
@@ -441,7 +448,13 @@ void do_send(osjob_t* j) {
     LMIC_setLinkCheckMode(0);
 #endif
     // Prepare upstream data transmission at the next possible time.
-    LMIC_setTxData2(1, (unsigned char *)&mydata, sizeof(mydata), 0);
+    if (!CAYENNE) {
+      Serial.println(F("sending standard packet"));
+      LMIC_setTxData2(1, (unsigned char *)&mydata, sizeof(mydata), 0);
+    } else {
+      Serial.println(F("sending cayenne packet"));
+      LMIC_setTxData2(1, (unsigned char *)&cayenne_lpp, sizeof(cayenne_lpp), 0); 
+    }
     Serial.println(F("Packet queued"));
   }
   // Next TX is scheduled after TX_COMPLETE event.
@@ -480,7 +493,20 @@ void readData()
 #endif
   mydata.temp= (mySensor.readTempC() * 100.00);  
   mydata.humi= (mySensor.readFloatHumidity() * 100.00);
-  mydata.pres= (mySensor.readFloatPressure() * 1);
+  mydata.pres= (mySensor.readFloatPressure() / 100);  // changed to hpa instead of pa
+   
+  cayenne_lpp[0] = 0x03;  // channel
+  cayenne_lpp[1] = 0x67;  // Chayenne Type for Temp
+  cayenne_lpp[2] = ((int((mySensor.readTempC() * 10))) >> 8) & 255;  // Erstes Byte 27.2°C ⇒ 272 ⇒ BIN 00000001 00010000 (HEX 0x01 0x10)
+  cayenne_lpp[3] = (int((mySensor.readTempC() * 10))) & 255;     // Zweites Byte 27.2°C ⇒ 272 ⇒ BIN 00000001 00010000 (HEX 0x01 0x10)
+  cayenne_lpp[4] = 0x04;  // channel
+  cayenne_lpp[5] = 0x68;  // Cayenne Type for Humidity         
+  cayenne_lpp[6] = (int(round(mySensor.readFloatHumidity() * 2))) & 255; // 51.6% ⇒ 103.2 ⇒ 103 ⇒ BIN 01100111 (HEX 0x67)
+  cayenne_lpp[7] = 0x05;  // Channel
+  cayenne_lpp[8] = 0x73;  // Cayenne Type for Pressure
+  cayenne_lpp[9] = ((int((mySensor.readFloatPressure()/100 * 10))) >> 8) & 255;  // Erstes Bye   1014 hpa ⇒ 1014 ⇒ BIN 00000011 11110110 (HEX 0x03 0xF6)
+  cayenne_lpp[10] = (int((mySensor.readFloatPressure()/100 * 10))) & 255;      // Zweites Byte 1014 hpa ⇒ 1014 ⇒ BIN 00000011 11110110 (HEX 0x03 0xF6 
+   
 #ifndef SLEEP
    pinMode(PB6, INPUT_ANALOG); //SCL save energy
    pinMode(PB7, INPUT_ANALOG); //SDA save energy
@@ -489,6 +515,17 @@ void readData()
   mydata.temp= (21.25) * 100.00;  
   mydata.humi= (43.85) * 100.00;
   mydata.pres= (1096) * 1;
+  cayenne_lpp[0] = 0x01;  // channel
+  cayenne_lpp[1] = 0x67;  // Chayenne Type for Temp
+  cayenne_lpp[2] = 0x00;
+  cayenne_lpp[3] = 0xFF;
+  cayenne_lpp[4] = 0x02;  // channel
+  cayenne_lpp[5] = 0x68;  // Cayenne Type for Humidity         
+  cayenne_lpp[6] = 0xFF;
+  cayenne_lpp[7] = 0x03;  // Channel
+  cayenne_lpp[8] = 0x73;  // Cayenne Type for Pressure
+  cayenne_lpp[9] = 0x00;
+  cayenne_lpp[10] = 0xFF;
 #endif
 
 #ifdef DEBUG
