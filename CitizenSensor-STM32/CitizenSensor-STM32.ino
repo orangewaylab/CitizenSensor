@@ -11,6 +11,10 @@
    install adapted STM32 Arduino integration from here 
    https://github.com/tomtor/Arduino_STM32
 
+   optional: install adapted power saving lmic version from here
+   https://github.com/tomtor/arduino-lmic
+   otherwise you have to comment out skipRX 
+
    non arduino mbed.org version can be found here
    https://developer.mbed.org/users/orangeway/code/STM32F103C8T6_LoRaWAN-lmic-app/
 
@@ -60,14 +64,17 @@
 
 #include "SparkFunBME280.h"
 
+//PCB Version 2.0
+#define PCB_VER 20 
+
 //Global sensor object
 BME280 mySensor;
 
 // use BME280 Sensor on I2C Pins ?
-#define USE_SENSOR
+//#define USE_SENSOR
 
 // send to single channel gateway?
-//#define SINGLE_CHN 1
+#define SINGLE_CHN 1
 
 // show debug statements; comment next line to disable debug statements
 #define DEBUG
@@ -101,13 +108,13 @@ static unsigned char NWKSKEY[16] = { 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0
 static unsigned char APPSKEY[16] = { 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0 };
 
 // LoRaWAN end-device address (DevAddr), ie 0xABB481F1  (from console.thethingsnetwork.org)
-static const u4_t DEVADDR = 0x26011F20 ; // <-- Change this address for every node!
+static const u4_t DEVADDR = 0x260115CC ; // <-- Change this address for every node!
 
 #else // if use OTAA (over the air activaton)
 // reversed (LSB) 8 bytes of AppEUI registered with console.thethingsnetwork.org
-static const u1_t APPEUI[8] = { }; 
+static const u1_t APPEUI[8] = { 0xEE, 0x32, 0x00, 0xF0, 0x7E, 0xD5, 0xB3, 0x70 }; 
 // MSB 16 bytes of the APPKEY used when registering a device with ttnctl register DevEUI AppKey
-static const unsigned char APPKEY[16] = { }; 
+static const unsigned char APPKEY[16] = { 0x92, 0x5B, 0xD0, 0x03, 0xBC, 0x78, 0x3C, 0xE2, 0x53, 0xA1, 0x17, 0xD0, 0x08, 0x47, 0x83, 0xCF }; 
 #endif
 
 // STM32 Unique Chip IDs - used as device id in OTAA scenario
@@ -309,8 +316,13 @@ const lmic_pinmap lmic_pins = {
 #if USE_SPI == 1
   .nss = PA4,
   .rxtx = LMIC_UNUSED_PIN,
+#if PCB_VER == 20
+.rst = PB1,
+  .dio = {PB3, PB4, LMIC_UNUSED_PIN} // first board version 20
+#else // PCV version >2.0
   .rst = PB0,
   .dio = {PA3, PB5, LMIC_UNUSED_PIN} // we dont use dio2
+#endif
 #else // USE_SPI == 2
   .nss = PB12,
   .rxtx = LMIC_UNUSED_PIN,
@@ -549,7 +561,19 @@ void setup() {
   Serial.begin(115200);
   Serial.println(F("Wait 5sec"));
   delay(5000);
+  
+#ifdef SLEEP
+  int cnt = 0; 
+  while (cnt++ < 25) {
+    Serial.println(F("wait for USB..."));
+    digitalWrite(led, LOW);
+    delay(10);
+    digitalWrite(led, HIGH);
+    delay(990);
+  }
   Serial.println(F("go"));
+#endif
+
 
 #if 0
   // Show ID in human friendly format (digits 1..8)
