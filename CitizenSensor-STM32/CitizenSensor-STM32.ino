@@ -1,3 +1,4 @@
+
 /*******************************************************************************
    Copyright (c) 2015 Thomas Telkamp and Matthijs Kooijman
              (c) 2017 Tom Vijlbrief
@@ -46,8 +47,8 @@
     
       if (port === 1) {
         decoded.temp = (bytes[1]*256+bytes[0])/100.0;
-        decoded.pres = (bytes[3]*256+bytes[2])/100.0;
-        decoded.humi = (bytes[5]*256+bytes[4])/1.0;
+        decoded.pres = (bytes[3]*256+bytes[2])/10.0;
+        decoded.humi = (bytes[5]*256+bytes[4])/100.0;
         decoded.power = bytes[6];
         decoded.rate = bytes[7];
       }
@@ -56,31 +57,48 @@
 
  *******************************************************************************/
 
+#include <libmaple/iwdg.h>
+
 #include <lmic.h>
 #include <hal/hal.h>
 #include <SPI.h>
 
 #include <Wire.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BME280.h>
+//#include "SparkFunBME280.h"
 
-#include "SparkFunBME280.h"
+//PCB Version 2.0 - undefine for PCB Version 4.0 and higher
+//#define PCB_VER 20 
 
-//PCB Version 2.0
-#define PCB_VER 20 
+// use BME280 Sensor on I2C Pins 
+#define USE_SENSOR
+//#define USE_SPARKFUN
 
-//Global sensor object
+// swap ic2 pins SCL/SDA for compytibility with bme280 breakout board - not required on PCB >=V4.0 
+//#define SWAPE_I2C
+
+
+// Adafruit libs seems to work better on STM32
+#ifdef USE_SPARKFUN
+//Global SparkFun sensor object
 BME280 mySensor;
+#else
+//Global Adafruit sensor object
+Adafruit_BME280 bme280; 
+#endif
 
-// use BME280 Sensor on I2C Pins ?
-//#define USE_SENSOR
-
-// send to single channel gateway?
+// send to single channel gateway? Stay on 868.1MHz but use different SF
 #define SINGLE_CHN 1
 
 // show debug statements; comment next line to disable debug statements
 #define DEBUG
 
-// Enable OTA? - work in progress
-//#define OTA
+// Enable OTAA? - work in progress
+//#define OTAA
+
+// Enable down link - required for OTAA
+#define RECEIVE 1
 
 // use low power sleep: 500-700 uA - disable if you need serial debug working
 //#define SLEEP
@@ -90,8 +108,9 @@ BME280 mySensor;
 // We safe some data in the RTC backup ram which survives DeepSleep
 #define DEEP_SLEEP  false
 
+// TODO: should be dynamic - after successfull OTAA deep sleep should be an option
 #if DEEP_SLEEP
-#undef OTA
+#undef OTAA
 #endif
 #endif
 
@@ -100,7 +119,7 @@ BME280 mySensor;
 // port for RFM95 LoRa Radio
 #define USE_SPI   1
 
-#ifndef OTA
+#ifndef OTAA
 // LoRaWAN NwkSKey, your network session key, 16 bytes (from console.thethingsnetwork.org)
 static unsigned char NWKSKEY[16] = { 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01 };
 
@@ -108,7 +127,8 @@ static unsigned char NWKSKEY[16] = { 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0
 static unsigned char APPSKEY[16] = { 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0 };
 
 // LoRaWAN end-device address (DevAddr), ie 0xABB481F1  (from console.thethingsnetwork.org)
-static const u4_t DEVADDR = 0x260115CC ; // <-- Change this address for every node!
+static const u4_t DEVADDR = 0x2601AACC ; // 001 <-- Change this address for every node!
+
 
 #else // if use OTAA (over the air activaton)
 // reversed (LSB) 8 bytes of AppEUI registered with console.thethingsnetwork.org
@@ -146,7 +166,7 @@ struct {
   
 } mydata;
 
-void initBME280(void);
+void initBME280Sparkfun(void);
 
 #ifdef SLEEP
 
@@ -235,12 +255,18 @@ void AlarmFunction () {
   systick_uptime_millis += sleepTime;
 }
 
+// wdg secured mdelay
 void mdelay(int n, bool mode = false)
 {
   sleepTime = n;
-  time_t nextAlarm = (rt.getTime() + n / 10); // Calculate from time now.
-  rt.createAlarm(&AlarmFunction, nextAlarm);
-  sleepMode(mode);
+  const int interval= 10000;
+  while (n > 0) {
+    time_t nextAlarm = rt.getTime() + (n > interval ? interval : n); // Calculate from time now.
+    rt.createAlarm(&AlarmFunction, nextAlarm);
+    iwdg_feed();
+    sleepMode(mode);
+    n-= interval;
+  }
 }
 
 void msleep(uint32_t ms)
@@ -272,7 +298,7 @@ void blinkN(int n, int d = 400, int t = 800)
 }
 
 
-#ifndef OTA
+#ifndef OTAA
 // These callbacks are only used in over-the-air activation, so they are
 // left empty here (we cannot leave them out completely unless
 // DISABLE_JOIN is set in config.h, otherwise the linker will complain).
@@ -381,6 +407,8 @@ void onEvent (ev_t ev) {
         mydata.rate2 = (LMIC.frame + LMIC.dataBeg)[0];
         txInterval = (1 << mydata.rate2);
         if (LMIC.dataLen > 1) {
+          Serial.print(F("...change SF to: "));
+          Serial.println((LMIC.frame + LMIC.dataBeg)[1]);
           switch ((LMIC.frame + LMIC.dataBeg)[1]) {
             case 7: LMIC_setDrTxpow(DR_SF7, 14); break;
             case 8: LMIC_setDrTxpow(DR_SF8, 14); break;
@@ -474,14 +502,27 @@ void readData()
   mydata.power = (vref / 10) - 200;
 
 #ifdef USE_SENSOR
-#ifndef SLEEP
-  Serial.println(mySensor.begin(), HEX);
+#ifdef SLEEP
+#ifdef USE_SPARKFUN
+  mySensor.begin();
+#else
+  bme280.begin(0x77);
+#endif
   delay(10); // wait some time
 #endif
+
+#ifdef USE_SPARKFUN
   mydata.temp= (mySensor.readTempC() * 100.00);  
-  mydata.humi= (mySensor.readFloatHumidity() * 100.00);
-  mydata.pres= (mySensor.readFloatPressure() * 1);
-#ifndef SLEEP
+  mydata.humi= (mySensor.readFloatHumidity() * 100.00F);
+  mydata.pres= (mySensor.readFloatPressure() * 25.6F);
+#else
+  bme280.takeForcedMeasurement();
+  mydata.temp= int(bme280.readTemperature() * 100.00F);
+  mydata.pres= int(bme280.readPressure() / 10.0F);
+  mydata.humi= int(bme280.readHumidity() * 100.00F);
+#endif // use sparkfun
+ 
+#ifdef SLEEP
    pinMode(PB6, INPUT_ANALOG); //SCL save energy
    pinMode(PB7, INPUT_ANALOG); //SDA save energy
 #endif
@@ -497,9 +538,9 @@ void readData()
   Serial.print("temp: ");
   Serial.println(mydata.temp);
   Serial.print("humi: ");
-  Serial.println(mydata.humi);
+  Serial.println(mydata.humi); // Serial.println(mySensor.readFloatHumidity());
   Serial.print("pres: ");
-  Serial.println(mydata.pres);
+  Serial.println(mydata.pres);  // Serial.println(  Serial.println(mydata.pres));
   Serial.println();
 #endif
 
@@ -546,8 +587,56 @@ void allInput()
   pinMode(PB15, INPUT_ANALOG);
 }
 
+void scanI2C() {
+  byte error, address;
+  int nDevices;
+
+  Serial.println("Scanning...");
+
+  Wire.begin();
+
+  nDevices = 0;
+  for(address = 1; address < 127; address++) {
+    // The i2c_scanner uses the return value of
+    // the Write.endTransmisstion to see if
+    // a device did acknowledge to the address.
+
+    Wire.beginTransmission(address);
+    error = Wire.endTransmission();
+    
+    if (error == 0) {
+      Serial.print("I2C device found at address 0x");
+      if (address < 16) 
+        Serial.print("0");
+      Serial.println(address, HEX);
+
+      nDevices++;
+    }
+    else if (error == 4) {
+      Serial.print("Unknown error at address 0x");
+      if (address < 16) 
+        Serial.print("0");
+      Serial.println(address, HEX);
+    }    
+  }
+  if (nDevices == 0)
+    Serial.println("No I2C devices found");
+  else
+    Serial.println("done");
+}
+
 void setup() {
+
+
+  iwdg_init(IWDG_PRE_256, 4095); // 26s watchdog
+  
   allInput();
+
+// some bme280 breakouts need software patch for hardware difference
+#ifdef SWAPE_I2C
+  Wire.scl_pin=PB7;
+  Wire.sda_pin=PB6;
+#endif
 
   SPIp = &mySPI;
 
@@ -561,6 +650,8 @@ void setup() {
   Serial.begin(115200);
   Serial.println(F("Wait 5sec"));
   delay(5000);
+
+  scanI2C();
   
 #ifdef SLEEP
   int cnt = 0; 
@@ -593,7 +684,7 @@ void setup() {
   // Reset the MAC state. Session and pending data transfers will be discarded.
   LMIC_reset();
 
-#ifndef OTA
+#ifndef OTAA
   // Set static session parameters. Instead of dynamically establishing a session
   // by joining the network, precomputed session parameters are be provided.
   LMIC_setSession (0x1, DEVADDR, NWKSKEY, APPSKEY);
@@ -631,32 +722,46 @@ void setup() {
   // devices' ping slots. LMIC does not have an easy way to define set this
   // frequency and support for class B is spotty and untested, so this
   // frequency is not configured here.
+
+ 
 #endif
+
+  //LMIC.skipRX = 0;
 
 #if F_CPU == 8000000UL
   // HSI is less accurate
   LMIC_setClockError(MAX_CLOCK_ERROR * 1 / 100);
 #endif
 
-#ifndef OTA
+#ifndef OTAA
   // TTN uses SF9 for its RX2 window.
   LMIC.dn2Dr = DR_SF9;
 
   // Set data rate and transmit power (note: txpow seems to be ignored by the library)
   LMIC_setDrTxpow(RATE, 14);
+
+  Serial.println(LMIC.dn2Freq);
+  
 #endif
 
 #ifdef SLEEP
   if (DEEP_SLEEP)
     LMIC.seqnoUp = readBR(0);
 
-#if defined(OTA) && DEEP_SLEEP
-#error "DEEP_SLEEP and OTA cannot be combined!"
+// TODO should be
+#if defined(OTAA) && DEEP_SLEEP
+#error "DEEP_SLEEP and OTAA cannot be combined YET!"
 #endif
 #endif
 
 #ifdef USE_SENSOR
-  initBME280();
+#ifdef USE_SPARKFUN
+  initBME280Sparkfun();
+  mySensor.begin();
+#else
+  initBME280Adafruit();
+  bme280.begin(0x77);
+#endif
 #endif
 
   // Start job
@@ -678,27 +783,39 @@ void loop() {
                ! ((++count < 1000) || !TX_done)
               );
 #endif
+  iwdg_feed();
   os_runloop_once();
+  
+#else // ifdef SLEEP
 
-#else
-
-#ifdef OTA
+#ifdef OTAA
   if (!joined) {
+#ifdef BLINK
+    pinMode(led, OUTPUT);
+    digitalWrite(led, LOW);
+#endif
+    iwdg_feed();
     os_runloop_once();
     return;
   }
 #endif
 
   if (next == false) {
+#ifdef BLINK
+    pinMode(led, OUTPUT);
     digitalWrite(led, LOW);
-    //if (DEEP_SLEEP)
+#endif
+#ifndef RECEIVE
     LMIC.skipRX = 1; // Do NOT wait for downstream data!
+#endif
+    iwdg_feed();
     os_runloop_once();
 
   } else {
 
 #ifdef BLINK
     digitalWrite(led, HIGH);
+    pinMode(led, INPUT_ANALOG);
 #endif
 
 #ifdef DEBUG
@@ -744,7 +861,13 @@ void loop() {
     hal_io_init();
 
     SPIp->begin();
-    Serial.println(mySensor.begin(), HEX);
+
+#ifdef USE_SPARKFUN
+    mySensor.begin();
+#else
+    bme280.begin();
+#endif
+
 
 #ifdef DEBUG
     Serial.println(F("Sleep complete"));
@@ -756,15 +879,17 @@ void loop() {
 #endif
 }
 
+
+#ifdef USE_SPARKFUN
 /*
  * WIP: not power optimized
  */
-void initBME280(void) {
+void initBME280Sparkfun(void) {
   
   //*** BME280 Driver settings********************************//
   //specify I2C address.  Can be 0x77(default) or 0x76
   mySensor.settings.commInterface = I2C_MODE;
-  mySensor.settings.I2CAddress = 0x76;
+  mySensor.settings.I2CAddress = 0x77;
     
   //***Operation settings*****************************//
   
@@ -826,4 +951,15 @@ void initBME280(void) {
   
   Serial.println("BME 280 init done");
 }
+#else
+void initBME280Adafruit(void) {
+  
+  bme280.setSampling(Adafruit_BME280::MODE_FORCED,
+    Adafruit_BME280::SAMPLING_X1, // temperature
+    Adafruit_BME280::SAMPLING_X1, // pressure
+    Adafruit_BME280::SAMPLING_X1, // humidity
+    Adafruit_BME280::FILTER_OFF   );
+}
+#endif
+  
 
