@@ -2,7 +2,7 @@
 /*******************************************************************************
    Copyright (c) 2015 Thomas Telkamp and Matthijs Kooijman
              (c) 2017 Tom Vijlbrief
-             (c) 2017 Hartmut John
+             (c) 2017,18 Hartmut John
 
    TTN Stuttgart Version - Hardware Küche #3, 17.05.2017
    works with stm32duiono.com bootloader for generic boards with led on PC13
@@ -39,21 +39,30 @@
    - optionally comment #define SLEEP
 
 
-   --- TTN Payload Decoder ---
-    function Decoder(bytes, port) {
-      // Decode an uplink message from a buffer
-      // (array) of bytes to an object of fields.
-      var decoded = {};
-    
-      if (port === 1) {
-        decoded.temp = (bytes[1]*256+bytes[0])/100.0;
-        decoded.pres = (bytes[3]*256+bytes[2])/10.0;
-        decoded.humi = (bytes[5]*256+bytes[4])/100.0;
-        decoded.power = bytes[6];
-        decoded.rate = bytes[7];
-      }
-      return decoded;
-    }
+   --- Replace the default on ttn console with this payload decoder 
+   --- serving Cayenne integration and generic MQTT ---
+   
+function Decoder(bytes, port) {
+  // Decode an uplink message from a buffer
+  // (array) of bytes to an object of fields.
+  var decoded = {};
+
+  if (port === 1) { // Citizen Sensor first generation
+    decoded.temp = (bytes[1]*256+bytes[0])/100.0;
+    decoded.pres = (bytes[3]*256+bytes[2])/10.0;
+    decoded.humi = (bytes[5]*256+bytes[4])/100.0;
+    decoded.power = bytes[6];
+    decoded.rate = bytes[7];
+  } else if (port === 2) { // Citizen Sensor with static Cayenne support
+    decoded.temp = (bytes[2]*256+bytes[3])/10.0;
+    decoded.pres = (bytes[9]*256+bytes[10])/10.0;
+    decoded.humi = (bytes[6]/2.0);
+    decoded.power = 100; // not used
+    decoded.rate = 0; // not used
+  } 
+
+  return decoded;
+}
 
  *******************************************************************************/
 
@@ -66,27 +75,17 @@
 #include <Wire.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BME280.h>
-//#include "SparkFunBME280.h"
+
+#define USE_CAYENNE
 
 //PCB Version 2.0 - undefine for PCB Version 4.0 and higher
 //#define PCB_VER 20 
 
 // use BME280 Sensor on I2C Pins 
 #define USE_SENSOR
-//#define USE_SPARKFUN
 
-// swap ic2 pins SCL/SDA for compytibility with bme280 breakout board - not required on PCB >=V4.0 
+// swap ic2 pins SCL/SDA for compatibility with some bme280 breakout boards - not required on PCB >=V4.0 
 //#define SWAPE_I2C
-
-
-// Adafruit libs seems to work better on STM32
-#ifdef USE_SPARKFUN
-//Global SparkFun sensor object
-BME280 mySensor;
-#else
-//Global Adafruit sensor object
-Adafruit_BME280 bme280; 
-#endif
 
 // send to single channel gateway? Stay on 868.1MHz but use different SF
 #define SINGLE_CHN 1
@@ -94,30 +93,28 @@ Adafruit_BME280 bme280;
 // show debug statements; comment next line to disable debug statements
 #define DEBUG
 
+// Blink a led
+#define BLINK
+
 // Enable OTAA? - work in progress
 //#define OTAA
 
 // Enable down link - required for OTAA
-#define RECEIVE 1
+//#define RECEIVE 1
 
-// use low power sleep: 500-700 uA - disable if you need serial debug working
-//#define SLEEP
+// use low power sleep - serial debug not working
+#define SLEEP
+// blue pill board with power led removed + RFM95 + BME280 consumes 370 uA during deep sleep
+// RAM is lost and reboots on wakeup.
+// We safe some data in the RTC backup ram which survives DeepSleep. 
+#define DEEP_SLEEP  true
 
 #ifdef SLEEP
-// or DeepSleep: 50uA, but RAM is lost and reboots on wakeup.
-// We safe some data in the RTC backup ram which survives DeepSleep
-#define DEEP_SLEEP  false
-
 // TODO: should be dynamic - after successfull OTAA deep sleep should be an option
 #if DEEP_SLEEP
 #undef OTAA
 #endif
 #endif
-
-#define led       LED_BUILTIN
-
-// port for RFM95 LoRa Radio
-#define USE_SPI   1
 
 #ifndef OTAA
 // LoRaWAN NwkSKey, your network session key, 16 bytes (from console.thethingsnetwork.org)
@@ -127,15 +124,33 @@ static unsigned char NWKSKEY[16] = { 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0
 static unsigned char APPSKEY[16] = { 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0 };
 
 // LoRaWAN end-device address (DevAddr), ie 0xABB481F1  (from console.thethingsnetwork.org)
-static const u4_t DEVADDR = 0x2601AACC ; // 001 <-- Change this address for every node!
 
+//#include "deviceids.h" - for bulk configuration
+#ifdef DEVICEID
+static const u4_t DEVADDR = DEVICEID ; // id from config include
+#else
+static const u4_t DEVADDR = 0x2601FFFF ; // placeholder <-- Change this address for every node!
+#endif
 
-#else // if use OTAA (over the air activaton)
+#else // if use OTAA (over the air activation) - work in progress
 // reversed (LSB) 8 bytes of AppEUI registered with console.thethingsnetwork.org
 static const u1_t APPEUI[8] = { 0xEE, 0x32, 0x00, 0xF0, 0x7E, 0xD5, 0xB3, 0x70 }; 
 // MSB 16 bytes of the APPKEY used when registering a device with ttnctl register DevEUI AppKey
 static const unsigned char APPKEY[16] = { 0x92, 0x5B, 0xD0, 0x03, 0xBC, 0x78, 0x3C, 0xE2, 0x53, 0xA1, 0x17, 0xD0, 0x08, 0x47, 0x83, 0xCF }; 
 #endif
+
+
+// ##### ----------------- board definitions ----------------------- ####
+
+#define led       LED_BUILTIN
+
+// port for RFM95 LoRa Radio
+#define USE_SPI   1
+
+//Global Adafruit sensor object
+Adafruit_BME280 bme280; 
+
+static const uint16 MAGICNB = 0xbeaf;
 
 // STM32 Unique Chip IDs - used as device id in OTAA scenario
 #define STM32_ID	((u1_t *) 0x1FFFF7E8)
@@ -144,19 +159,15 @@ SPIClass mySPI(USE_SPI);
 
 extern SPIClass *SPIp;
 
-// Blink a led
-#define BLINK
+void blinkN2(int n, int d, int t);
 
 // Schedule TX every this many seconds (might become longer due to duty
-// cycle limitations).
-#ifdef SLEEP
-int txInterval = (DEEP_SLEEP ? 300 : 60); // Note that the LED flashing takes some time
-#else
-int txInterval = 60;
-#endif
+// cycle limitations). Note that the LED flashing takes some time
+int txInterval = 60*5;
 
 #define RATE        DR_SF9
 
+// generic payload object
 struct {
   unsigned short temp;
   unsigned short pres;
@@ -164,24 +175,33 @@ struct {
   byte power;
   byte rate2;
   
-} mydata;
+} payload;
+
+// Cayenne Low Power Payload (LPP) object
+byte cayenne_lpp[11];  
 
 void initBME280Sparkfun(void);
-
-#ifdef SLEEP
 
 // Defined for power and sleep functions pwr.h and scb.h
 #include <libmaple/pwr.h>
 #include <libmaple/scb.h>
+#include <libmaple/rcc.h>
 
 #include <RTClock.h>
 
-RTClock rt(RTCSEL_LSI, 399); // 10 milli second alarm
+//RTClock rt(RTCSEL_LSI, 1000); // 10 milli second alarm
+RTClock rt(RTCSEL_LSI,33); // 10 milli second alarm
+//RTClock rt(RTCSEL_LSE,33); // 10 milli second alarm
 
 // Define the Base address of the RTC registers (battery backed up CMOS Ram), so we can use them for config of touch screen or whatever.
 // See http://stm32duino.com/viewtopic.php?f=15&t=132&hilit=rtc&start=40 for a more details about the RTC NVRam
 // 10x 16 bit registers are available on the STM32F103CXXX more on the higher density device.
 #define BKP_REG_BASE   ((uint32_t *)(0x40006C00 +0x04))
+
+void iwdg_feed_debug(){
+  //iwdg_feed();
+  blinkN2(1,20,0);
+}
 
 void storeBR(int i, uint32_t v) {
   BKP_REG_BASE[2 * i] = (v << 16);
@@ -194,21 +214,24 @@ uint32_t readBR(int i) {
 
 bool next = false;
 
-void sleepMode(bool deepSleepFlag)
+void enterSleepMode(bool deepSleepFlag)
 {
-  // Clear PDDS and LPDS bits
-  PWR_BASE->CR &= PWR_CR_LPDS | PWR_CR_PDDS | PWR_CR_CWUF;
+  // Clear PDDS and LPDS bits and wakeup pin and set Clear WUF flag (required per datasheet):
+  PWR_BASE->CR &= PWR_CR_LPDS | PWR_CR_PDDS | PWR_CR_CWUF |  PWR_CSR_EWUP;
 
-  // Set PDDS and LPDS bits for standby mode, and set Clear WUF flag (required per datasheet):
-  PWR_BASE->CR |= PWR_CR_CWUF;
+
+
+  // magic https://community.particle.io/t/how-to-put-spark-core-to-sleep-and-wakeup-on-interrupt-signal-on-a-pin/5947/56
   // Enable wakeup pin bit.
-  PWR_BASE->CR |=  PWR_CSR_EWUP;
-
+  PWR_BASE->CSR |= PWR_CSR_EWUP; 
+  PWR_BASE->CR  |= PWR_CR_CWUF;
   SCB_BASE->SCR |= SCB_SCR_SLEEPDEEP;
 
   // System Control Register Bits. See...
   // http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.dui0497a/Cihhjgdh.html
-  if (deepSleepFlag) {
+  if (deepSleepFlag) { // standby mode
+    PWR_BASE->CR |= PWR_CR_CWUF; // FIX to save power on subsequent runs too
+    // Set PDDS and LPDS bits for standby,
     // Set Power down deepsleep bit.
     PWR_BASE->CR |= PWR_CR_PDDS;
     // Unset Low-power deepsleep.
@@ -253,48 +276,21 @@ void AlarmFunction () {
 
   extern volatile uint32 systick_uptime_millis;
   systick_uptime_millis += sleepTime;
+
 }
 
-// wdg secured mdelay
-void mdelay(int n, bool mode = false)
-{
-  sleepTime = n;
-  const int interval= 10000;
-  while (n > 0) {
-    time_t nextAlarm = rt.getTime() + (n > interval ? interval : n); // Calculate from time now.
-    rt.createAlarm(&AlarmFunction, nextAlarm);
-    iwdg_feed();
-    sleepMode(mode);
-    n-= interval;
-  }
-}
 
-void msleep(uint32_t ms)
-{
-  uint32_t start = rt.getTime();
-
-  while (rt.getTime() - start < ms) {
-    asm("    wfi");
-  }
-}
-#else
-void mdelay(int n, bool mode = false)
-{
-  delay(n);
-}
-#endif
-
-void blinkN(int n, int d = 400, int t = 800)
+void blinkN2(int n, int d = 400, int t = 800)
 {
   pinMode(LED_BUILTIN, OUTPUT);
   for (int i = 0; i < n; i++) {
     digitalWrite(LED_BUILTIN, 0);
-    mdelay(5);
+    delay(5);
     digitalWrite(LED_BUILTIN, 1);
-    mdelay(d);
+    delay(d);
   }
   pinMode(LED_BUILTIN, INPUT_ANALOG);
-  mdelay(t);
+  delay(t);
 }
 
 
@@ -305,15 +301,17 @@ void blinkN(int n, int d = 400, int t = 800)
 void os_getArtEui (u1_t* buf) { }
 void os_getDevEui (u1_t* buf) { }
 void os_getDevKey (u1_t* buf) { }
-#else
+
+#else // OTAA
+
 void os_getArtEui (u1_t* buf) {
   memcpy(buf, APPEUI, 8);
 }
 
 void os_getDevKey (u1_t* buf) {
   memcpy(buf, APPKEY, 16);
-#if 0
-  // Use human friendly format:
+
+#if 0 // use chip id - not used yet
   u1_t* p = STM32_ID;
   buf[0] = (p[0] & 0x7) + 1;
   buf[1] = (p[1] & 0x7) + 1;
@@ -344,8 +342,8 @@ const lmic_pinmap lmic_pins = {
   .rxtx = LMIC_UNUSED_PIN,
 #if PCB_VER == 20
 .rst = PB1,
-  .dio = {PB3, PB4, LMIC_UNUSED_PIN} // first board version 20
-#else // PCV version >2.0
+  .dio = {PB3, PB4, LMIC_UNUSED_PIN} // different IOs on pcb version 2.0
+#else // PCB version >2.0
   .rst = PB0,
   .dio = {PA3, PB5, LMIC_UNUSED_PIN} // we dont use dio2
 #endif
@@ -359,7 +357,6 @@ const lmic_pinmap lmic_pins = {
 
 
 bool TX_done = false;
-
 bool joined = false;
 
 void onEvent (ev_t ev) {
@@ -404,8 +401,8 @@ void onEvent (ev_t ev) {
         Serial.print(F("Data Received: "));
         Serial.write(LMIC.frame + LMIC.dataBeg, LMIC.dataLen);
         Serial.println();
-        mydata.rate2 = (LMIC.frame + LMIC.dataBeg)[0];
-        txInterval = (1 << mydata.rate2);
+        payload.rate2 = (LMIC.frame + LMIC.dataBeg)[0];
+        txInterval = (1 << payload.rate2);
         if (LMIC.dataLen > 1) {
           Serial.print(F("...change SF to: "));
           Serial.println((LMIC.frame + LMIC.dataBeg)[1]);
@@ -423,7 +420,7 @@ void onEvent (ev_t ev) {
 #ifndef SLEEP
       os_setTimedCallback(&sendjob, os_getTime() + sec2osticks(txInterval), do_send);
 #else
-      next = true;
+      next = true; // handling of going to deep sleep in loop()
 #endif
 
       break;
@@ -469,8 +466,13 @@ void do_send(osjob_t* j) {
     LMIC_setLinkCheckMode(0);
 #endif
     // Prepare upstream data transmission at the next possible time.
-    LMIC_setTxData2(1, (unsigned char *)&mydata, sizeof(mydata), 0);
-    Serial.println(F("Packet queued"));
+#ifdef USE_CAYENNE
+    Serial.println(F("cayenne payload queued"));
+    LMIC_setTxData2(2, (unsigned char *)&cayenne_lpp, sizeof(cayenne_lpp), 0);
+#else
+    Serial.println(F("generic payload queued"));
+    LMIC_setTxData2(1, (unsigned char *)&payload, sizeof(payload), 0);
+#endif
   }
   // Next TX is scheduled after TX_COMPLETE event.
 #ifdef DEBUG
@@ -488,59 +490,74 @@ void readData()
   regs->CR2 |= ADC_CR2_TSVREFE; // enable VREFINT and temp sensor
   regs->SMPR1 = (ADC_SMPR1_SMP17 /* | ADC_SMPR1_SMP16 */); // sample rate for VREFINT ADC channel
 
+  delay(50);
+
   int vref = 1200 * 4096 / adc_read(ADC1, 17); // ADC sample to millivolts
   regs->CR2 &= ~ADC_CR2_TSVREFE; // disable VREFINT and temp sensor
 
   adc_disable(ADC1);
 
   vref += 5;
+
+  /**
   if (vref < 2000 || vref >= 3000)
     blinkN(vref / 1000);
+  
   blinkN(vref % 1000 / 100);
   blinkN(vref % 100 / 10);
+  **/
+  
+  payload.power = (vref / 10) - 200;
 
-  mydata.power = (vref / 10) - 200;
 
 #ifdef USE_SENSOR
-#ifdef SLEEP
-#ifdef USE_SPARKFUN
-  mySensor.begin();
-#else
-  bme280.begin(0x77);
-#endif
-  delay(10); // wait some time
-#endif
 
-#ifdef USE_SPARKFUN
-  mydata.temp= (mySensor.readTempC() * 100.00);  
-  mydata.humi= (mySensor.readFloatHumidity() * 100.00F);
-  mydata.pres= (mySensor.readFloatPressure() * 25.6F);
-#else
+  delay(100); // give BME some time FIXME
+
   bme280.takeForcedMeasurement();
-  mydata.temp= int(bme280.readTemperature() * 100.00F);
-  mydata.pres= int(bme280.readPressure() / 10.0F);
-  mydata.humi= int(bme280.readHumidity() * 100.00F);
-#endif // use sparkfun
- 
-#ifdef SLEEP
-   pinMode(PB6, INPUT_ANALOG); //SCL save energy
-   pinMode(PB7, INPUT_ANALOG); //SDA save energy
-#endif
-#else
-  mydata.temp= (21.25) * 100.00;  
-  mydata.humi= (43.85) * 100.00;
-  mydata.pres= (1096) * 1;
+  payload.temp= int(bme280.readTemperature() * 100.00F);
+  payload.pres= int(bme280.readPressure() / 10.0F);
+  payload.humi= int(bme280.readHumidity() * 100.00F);
+   
+  cayenne_lpp[0] = 0x01;  // channel
+  cayenne_lpp[1] = 0x67;  // Chayenne Type "Temp"
+  cayenne_lpp[2] = ((int((payload.temp / 10))) >> 8) & 255;
+  cayenne_lpp[3] = (int((bme280.readTemperature() * 10))) & 255;
+  cayenne_lpp[4] = 0x02;  // channel
+  cayenne_lpp[5] = 0x68;  // Cayenne Type "Humidity"         
+  cayenne_lpp[6] = (int(round(payload.humi / 50))) & 255;
+  cayenne_lpp[7] = 0x03;  // Channel
+  cayenne_lpp[8] = 0x73;  // Cayenne Type "Pressure"
+  cayenne_lpp[9] = ((int(payload.pres)) >> 8) & 255;
+  cayenne_lpp[10] = (int(payload.pres)) & 255;
+
+  pinMode(PB6, INPUT_ANALOG); //SCL save energy
+  pinMode(PB7, INPUT_ANALOG); //SDA save energy
+
+#else // simulate sensor
+  payload.temp= (19.15) * 100.00;  
+  payload.humi= (52.45) * 100.00;
+  payload.pres= (1096) * 1;
+  cayenne_lpp[0] = 0x01;  // channel
+  cayenne_lpp[1] = 0x67;  // Chayenne Type "Temp"
+  cayenne_lpp[2] = 0x00;
+  cayenne_lpp[3] = 0xFF;
+  cayenne_lpp[4] = 0x02;  // channel
+  cayenne_lpp[5] = 0x68;  // Cayenne Type "Humidity"        
+  cayenne_lpp[6] = 0xFF;
+  cayenne_lpp[7] = 0x03;  // Channel
+  cayenne_lpp[8] = 0x73;  // Cayenne Type "Pressure"
+  cayenne_lpp[9] = 0x00;
+  cayenne_lpp[10] = 0xFF;
 #endif
 
 #ifdef DEBUG
-  //Serial.println(v);
-
   Serial.print("temp: ");
-  Serial.println(mydata.temp);
+  Serial.println(payload.temp);
   Serial.print("humi: ");
-  Serial.println(mydata.humi); // Serial.println(mySensor.readFloatHumidity());
+  Serial.println(payload.humi); // Serial.println(mySensor.readFloatHumidity());
   Serial.print("pres: ");
-  Serial.println(mydata.pres);  // Serial.println(  Serial.println(mydata.pres));
+  Serial.println(payload.pres);  // Serial.println(  Serial.println(payload.pres));
   Serial.println();
 #endif
 
@@ -610,6 +627,10 @@ void scanI2C() {
         Serial.print("0");
       Serial.println(address, HEX);
 
+      if (address == 1) {
+        Serial.print("Hint: unknown device - missing pullups on i2c bus?");
+      }
+
       nDevices++;
     }
     else if (error == 4) {
@@ -625,12 +646,14 @@ void scanI2C() {
     Serial.println("done");
 }
 
+
+/***** SETUP
+ *  
+ */
 void setup() {
 
-
-  iwdg_init(IWDG_PRE_256, 4095); // 26s watchdog
-  
-  allInput();
+// as soon as possible
+rt.createAlarm(&AlarmFunction, rt.getTime() + txInterval*1000);
 
 // some bme280 breakouts need software patch for hardware difference
 #ifdef SWAPE_I2C
@@ -648,41 +671,79 @@ void setup() {
 #endif
 
   Serial.begin(115200);
-  Serial.println(F("Wait 5sec"));
-  delay(5000);
+  Serial.println(F("Wait 1sec"));
+  delay(1000); // give usb port the chance to be regognized by host driver 
 
-  scanI2C();
-  
-#ifdef SLEEP
+  allInput(); // save energy
+
   int cnt = 0; 
-  while (cnt++ < 25) {
-    Serial.println(F("wait for USB..."));
+  Serial.println(F("wait 3sec for USB before going to sleep."));
+  while (cnt++ < 3) {
+    Serial.print(F("."));
     digitalWrite(led, LOW);
     delay(10);
     digitalWrite(led, HIGH);
-    delay(990);
+    delay(290);
   }
   Serial.println(F("go"));
-#endif
+  delay(100);
 
+#ifdef BLINK
+    digitalWrite(led, HIGH);
+    pinMode(led, INPUT_ANALOG);
+ #endif
 
-#if 0
-  // Show ID in human friendly format (digits 1..8)
-  u1_t* p = STM32_ID;
-  blinkN((p[0] & 0x7) + 1);
-  blinkN((p[1] & 0x7) + 1);
-  blinkN((p[2] & 0x7) + 1);
-  blinkN((p[3] & 0x7) + 1);
-  blinkN((p[4] & 0x7) + 1);
-  blinkN((p[5] & 0x7) + 1);
-  blinkN((p[6] & 0x7) + 1);
-  blinkN((p[7] & 0x7) + 1);
-#endif
+ #ifdef DEBUG
+    Serial.print("LMIC.seqnoUp: ");
+    Serial.println(LMIC.seqnoUp);
+ #endif
+
+    if (DEEP_SLEEP) {
+       if (readBR(2) != MAGICNB) {
+         LMIC.seqnoUp = 0;
+         storeBR(0, LMIC.seqnoUp);
+         storeBR(2, MAGICNB);
+       }
+    }
 
   // LMIC init
   os_init();
   // Reset the MAC state. Session and pending data transfers will be discarded.
   LMIC_reset();
+
+// only to test power mode - not used
+#ifdef TESTSLEEP
+while(true) {
+    SPIp->end();
+
+    pinMode(PB6, INPUT_ANALOG); //SCL
+    pinMode(PB7, INPUT_ANALOG); //SDA
+
+    digitalWrite(PA5, LOW); // SCK
+    pinMode(PA5, OUTPUT);
+
+    digitalWrite(PA7, LOW); // MOSI
+    pinMode(PA7, OUTPUT);
+
+    pinMode(PA6, INPUT_ANALOG); // MISO
+
+    digitalWrite(lmic_pins.nss, LOW); // NSS
+    pinMode(lmic_pins.nss, OUTPUT);
+
+    // DIO Inputs
+    pinMode(lmic_pins.dio[0], INPUT_ANALOG);
+    pinMode(lmic_pins.dio[1], INPUT_ANALOG);
+    pinMode(lmic_pins.dio[2], INPUT_ANALOG);
+
+    pinMode(lmic_pins.rst, INPUT_ANALOG);
+
+    // Serial
+    pinMode(PA9, INPUT_ANALOG);
+    pinMode(PA10, INPUT_ANALOG);
+    
+    enterSleepMode(DEEP_SLEEP);
+}
+#endif
 
 #ifndef OTAA
   // Set static session parameters. Instead of dynamically establishing a session
@@ -690,15 +751,8 @@ void setup() {
   LMIC_setSession (0x1, DEVADDR, NWKSKEY, APPSKEY);
 #endif
 
-  // Set up the channels used by the Things Network, which corresponds
-  // to the defaults of most gateways. Without this, only three base
-  // channels from the LoRaWAN specification are used, which certainly
-  // works, so it is good for debugging, but can overload those
-  // frequencies, so be sure to configure the full frequency range of
-  // your network here (unless your network autoconfigures them).
-  // Setting up channels should happen after LMIC_setSession, as that
-  // configures the minimal channel set.
 #ifdef SINGLE_CHN
+  // only to support non standard single channel geteways 
   LMIC_setupChannel(0, 868100000, DR_RANGE_MAP(DR_SF12, DR_SF7),  BAND_CENTI);      // g-band
   LMIC_disableChannel(1);
   LMIC_disableChannel(2);
@@ -709,6 +763,14 @@ void setup() {
   LMIC_disableChannel(7);
   LMIC_disableChannel(8);
 #else 
+  // Set up the channels used by the Things Network, which corresponds
+  // to the defaults of most gateways. Without this, only three base
+  // channels from the LoRaWAN specification are used, which certainly
+  // works, so it is good for debugging, but can overload those
+  // frequencies, so be sure to configure the full frequency range of
+  // your network here (unless your network autoconfigures them).
+  // Setting up channels should happen after LMIC_setSession, as that
+  // configures the minimal channel set.
   LMIC_setupChannel(0, 868100000, DR_RANGE_MAP(DR_SF12, DR_SF7),  BAND_CENTI);      // g-band
   LMIC_setupChannel(1, 868300000, DR_RANGE_MAP(DR_SF12, DR_SF7B), BAND_CENTI);      // g-band
   LMIC_setupChannel(2, 868500000, DR_RANGE_MAP(DR_SF12, DR_SF7),  BAND_CENTI);      // g-band
@@ -722,46 +784,32 @@ void setup() {
   // devices' ping slots. LMIC does not have an easy way to define set this
   // frequency and support for class B is spotty and untested, so this
   // frequency is not configured here.
-
- 
 #endif
-
-  //LMIC.skipRX = 0;
 
 #if F_CPU == 8000000UL
   // HSI is less accurate
   LMIC_setClockError(MAX_CLOCK_ERROR * 1 / 100);
 #endif
 
-#ifndef OTAA
   // TTN uses SF9 for its RX2 window.
   LMIC.dn2Dr = DR_SF9;
-
+  
+  Serial.print("LMIC.dn2Freq: ");
+  Serial.println(LMIC.dn2Freq/1000000.0);
+  
   // Set data rate and transmit power (note: txpow seems to be ignored by the library)
   LMIC_setDrTxpow(RATE, 14);
 
-  Serial.println(LMIC.dn2Freq);
-  
-#endif
-
-#ifdef SLEEP
   if (DEEP_SLEEP)
     LMIC.seqnoUp = readBR(0);
 
-// TODO should be
-#if defined(OTAA) && DEEP_SLEEP
-#error "DEEP_SLEEP and OTAA cannot be combined YET!"
-#endif
+#ifdef USE_SENSOR
+  bme280.begin(0x77);
+  initBME280Adafruit();
 #endif
 
-#ifdef USE_SENSOR
-#ifdef USE_SPARKFUN
-  initBME280Sparkfun();
-  mySensor.begin();
-#else
-  initBME280Adafruit();
-  bme280.begin(0x77);
-#endif
+#ifndef RECEIVE
+    LMIC.skipRX = 1; // Do NOT wait for downstream data!
 #endif
 
   // Start job
@@ -770,63 +818,39 @@ void setup() {
 #ifdef DEBUG
   Serial.println(F("Leave setup"));
 #endif
+
 }
 
 
 void loop() {
 
-#ifndef SLEEP
-
-#ifdef BLINK
-  static int count;
-  digitalWrite(led,
-               ! ((++count < 1000) || !TX_done)
-              );
-#endif
-  iwdg_feed();
-  os_runloop_once();
-  
-#else // ifdef SLEEP
-
-#ifdef OTAA
-  if (!joined) {
-#ifdef BLINK
+  if (next == false) { // still in LMIC state maschine eg. wait for sending, RX ...
+    
+ #ifdef BLINK
     pinMode(led, OUTPUT);
     digitalWrite(led, LOW);
-#endif
-    iwdg_feed();
-    os_runloop_once();
-    return;
-  }
-#endif
+ #endif
 
-  if (next == false) {
-#ifdef BLINK
-    pinMode(led, OUTPUT);
-    digitalWrite(led, LOW);
-#endif
-#ifndef RECEIVE
-    LMIC.skipRX = 1; // Do NOT wait for downstream data!
-#endif
-    iwdg_feed();
+    iwdg_feed_debug();
     os_runloop_once();
 
-  } else {
+  } else { // LMIC cycle fnished including receive
 
-#ifdef BLINK
+ #ifdef BLINK
     digitalWrite(led, HIGH);
     pinMode(led, INPUT_ANALOG);
-#endif
+ #endif
 
-#ifdef DEBUG
+ #ifdef DEBUG
+    Serial.print("LMIC.seqnoUp:");
     Serial.println(LMIC.seqnoUp);
-#endif
-
-    if (DEEP_SLEEP)
+ #endif
+ 
+    if (DEEP_SLEEP) // keep seqNo in RTC ram
       storeBR(0, LMIC.seqnoUp);
 
     SPIp->end();
-    //mySensor.end();
+
     pinMode(PB6, INPUT_ANALOG); //SCL
     pinMode(PB7, INPUT_ANALOG); //SDA
 
@@ -852,106 +876,14 @@ void loop() {
     pinMode(PA9, INPUT_ANALOG);
     pinMode(PA10, INPUT_ANALOG);
 
-    mdelay(txInterval * 1000, DEEP_SLEEP);
+    enterSleepMode(DEEP_SLEEP);
 
-    Serial.begin(115200);
-
-    extern void hal_io_init();
-    digitalWrite(lmic_pins.rst, 1); // prevent reset
-    hal_io_init();
-
-    SPIp->begin();
-
-#ifdef USE_SPARKFUN
-    mySensor.begin();
-#else
-    bme280.begin();
-#endif
-
-
-#ifdef DEBUG
-    Serial.println(F("Sleep complete"));
-#endif
-    next = false;
-    // Start job
-    do_send(&sendjob);
+    // should not be reached, board reboots on wakeup
+    blinkN2(8,300,100);
   }
-#endif
 }
 
 
-#ifdef USE_SPARKFUN
-/*
- * WIP: not power optimized
- */
-void initBME280Sparkfun(void) {
-  
-  //*** BME280 Driver settings********************************//
-  //specify I2C address.  Can be 0x77(default) or 0x76
-  mySensor.settings.commInterface = I2C_MODE;
-  mySensor.settings.I2CAddress = 0x77;
-    
-  //***Operation settings*****************************//
-  
-  //renMode can be:
-  //  0, Sleep mode
-  //  1 or 2, Forced mode
-  //  3, Normal mode
-  mySensor.settings.runMode = 3; //Normal mode
-  
-  //tStandby can be:
-  //  0, 0.5ms
-  //  1, 62.5ms
-  //  2, 125ms
-  //  3, 250ms
-  //  4, 500ms
-  //  5, 1000ms
-  //  6, 10ms
-  //  7, 20ms
-  mySensor.settings.tStandby = 0;
-  
-  //filter can be off or number of FIR coefficients to use:
-  //  0, filter off
-  //  1, coefficients = 2
-  //  2, coefficients = 4
-  //  3, coefficients = 8
-  //  4, coefficients = 16
-  mySensor.settings.filter = 0;
-  
-  //tempOverSample can be:
-  //  0, skipped
-  //  1 through 5, oversampling *1, *2, *4, *8, *16 respectively
-  mySensor.settings.tempOverSample = 1;
-
-  //pressOverSample can be:
-  //  0, skipped
-  //  1 through 5, oversampling *1, *2, *4, *8, *16 respectively
-    mySensor.settings.pressOverSample = 1;
-  
-  //humidOverSample can be:
-  //  0, skipped
-  //  1 through 5, oversampling *1, *2, *4, *8, *16 respectively
-  mySensor.settings.humidOverSample = 3;
-
-  delay(10);  //Make sure sensor had enough time to turn on. BME280 requires 2ms to start up.
-  Serial.println(mySensor.begin(), HEX);
-
-  Serial.print("Displaying BME280 ID, reset and ctrl regs\n");
-  
-  Serial.print("ID(0xD0): 0x");
-  Serial.println(mySensor.readRegister(BME280_CHIP_ID_REG), HEX);
-  Serial.print("Reset register(0xE0): 0x");
-  Serial.println(mySensor.readRegister(BME280_RST_REG), HEX);
-  Serial.print("ctrl_meas(0xF4): 0x");
-  Serial.println(mySensor.readRegister(BME280_CTRL_MEAS_REG), HEX);
-  Serial.print("ctrl_hum(0xF2): 0x");
-  Serial.println(mySensor.readRegister(BME280_CTRL_HUMIDITY_REG), HEX);
-
-  //randomSeed(analogRead(0));
-  
-  Serial.println("BME 280 init done");
-}
-#else
 void initBME280Adafruit(void) {
   
   bme280.setSampling(Adafruit_BME280::MODE_FORCED,
@@ -960,6 +892,36 @@ void initBME280Adafruit(void) {
     Adafruit_BME280::SAMPLING_X1, // humidity
     Adafruit_BME280::FILTER_OFF   );
 }
-#endif
+
+void sleepBME280Adafruit(void) {
+  
+  bme280.setSampling(Adafruit_BME280::MODE_FORCED,
+    Adafruit_BME280::SAMPLING_NONE, // temperature
+    Adafruit_BME280::SAMPLING_NONE, // pressure
+    Adafruit_BME280::SAMPLING_NONE, // humidity
+    Adafruit_BME280::FILTER_OFF   );
+}
+
+void PrintHex83(uint8_t *data, uint8_t length) // prints 8-bit data in hex
+{
+ char tmp[length*2+1];
+ byte first ;
+ int j=0;
+ for (uint8_t i=0; i<length; i++) 
+ {
+   first = (data[i] >> 4) | 48;
+   if (first > 57) tmp[j] = first + (byte)39;
+   else tmp[j] = first ;
+   j++;
+
+   first = (data[i] & 0x0F) | 48;
+   if (first > 57) tmp[j] = first + (byte)39; 
+   else tmp[j] = first;
+   j++;
+ }
+ tmp[length*2] = 0;
+ Serial.println(tmp);
+}
+
   
 
